@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Runtime.Serialization.Formatters;
 using BepInEx;
 using HarmonyLib;
 using HumanAPI;
@@ -8,15 +9,15 @@ namespace spsp
 {
         [BepInPlugin("com.kirisoup.hff.spsp", PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION)]
         [BepInProcess("Human.exe")]
-        public partial class Plugin : BaseUnityPlugin{
+        public partial class Plugin : BaseUnityPlugin {
 
                 readonly Harmony harmony = new("com.kirisoup.hff.spsp");
 
                 public static bool isEnabled;
 
-                public void Awake() => harmony.PatchAll();
+                // public void Awake() => harmony.PatchAll();
 
-                public void OnDestroy() => harmony.UnpatchSelf();
+                // public void OnDestroy() => harmony.UnpatchSelf();
 
                 public void Start() {
 
@@ -37,59 +38,43 @@ namespace spsp
 
                 public void OnGUI() {
 
-                        RenderSphereSamples();
+                        DrawSphereSamples();
                 }
 
-                static void RenderSphereSamples() {
-
-                        Plane plane = new(Camera.main.transform.forward, Camera.main.transform.position);
+                static void DrawSphereSamples() {
 
                         if (SphereSamples.Count == 0) return;
 
+                        List<Collider> objs = new();
                         List<Vector3> points = new();
 
-                        foreach (var sample in SphereSamples) {
+                        foreach (var sample in SphereSamples) foreach (var hitgroup in sample.HitGroups) {
 
-                                foreach (var hit in sample.Hits) {
+                                foreach (var hit in hitgroup.Key) {
 
-                                        if (pointBehindCam(hit.point, plane)) continue;
-
-                                        if (hit.collider.transform.IsChildOf(Human.Localplayer.transform)) continue;
-
-
-                                        Vector3 screen = Camera.main.WorldToScreenPoint(hit.point);
-
-                                        Vector2 pos = new(screen.x, screen.y);
+                                        Vector2 pos = Camera.main.WorldToScreenPoint(hit.Pos);
 
                                         Rect rect = new(pos.x, - pos.y + Screen.height, 100, 100);
 
+                                        Color color = hitgroup.Value switch {
+                                                ColType.standard => Color.white,
+                                                ColType.rigidbody => Color.cyan,
+                                                ColType.invisible => Color.blue,
+                                                ColType.trigger => Color.magenta,
+                                                ColType.checkpoint => new(1, 0.66f, 0),
+                                                ColType.passtrigger => Color.green,
+                                                ColType.falltrigger => Color.red,
+                                                _ => Color.white,
+                                        };
+
                                         GUIStyle style = new();
 
-                                        if (!hit.collider.isTrigger) style.normal.textColor = Color.white;
-
-                                        else {
-
-                                                if (hit.collider.gameObject.GetComponent<Checkpoint>() is not null) 
-                                                        style.normal.textColor = new(1, 0.66f, 0);
-
-                                                else if (hit.collider.gameObject.GetComponent<LevelPassTrigger>() is not null) 
-                                                        style.normal.textColor = Color.green;
-
-                                                else if (hit.collider.gameObject.GetComponent<FallTrigger>() is not null) 
-                                                        style.normal.textColor = Color.red;
-
-                                                else style.normal.textColor = Color.magenta;
-
-                                        }
+                                        style.normal.textColor = color;
 
                                         GUI.Label(rect, "+", style);
                                 }
-                        }
-                }
 
-                static bool pointBehindCam(Vector3 point, Plane plane)
-                {
-                        return plane.GetDistanceToPoint(point) < 0;
+                        }
                 }
 
                 public static List<SphereSample> SphereSamples = new();
@@ -109,61 +94,74 @@ namespace spsp
 
                 public class SphereSample {
 
-                        Vector3 o;
-                        Vector3[] e;
-                        float r = 7.5f;
-                        int n = 256;
+                        Vector3 origin;
+                        Vector3[] ends;
+                        EspHit[] hits;
+                        EspLine[] lines;
+                        Dictionary<EspHit[], ColType> hitGroups;
 
-                        RaycastHit[] hits;
+                        public float Radius { get; set; } = 7.5f;
+                        public int Count { get; set; } = 8;
 
-                        AnchorType type = AnchorType.localplayer;
+                        public bool SampleInvisible { get; set; } = true;
+                        public bool SampleRigid { get; set; } = true;
+                        public bool SampleMiscColli { get; set; } = true;
+                        public bool SampleCP { get; set; } = true;
+                        public bool SamplePTrig { get; set; } = true;
+                        public bool SampleFTrig { get; set; } = true;
+                        public bool SampleMiscTrig { get; set; } = true;
 
+                        public AnchorType Type { get; set; } = AnchorType.localplayer;
 
-                        public AnchorType Type {
-                                get => type;
-                                set => type = value;
-                        }
+                        Vector3 PlayerPos { get => Human.Localplayer.transform.position + Vector3.up; }
+
+                        Vector3 syncOrigin = new();
+
+                        bool shouldSync { get => Origin == syncOrigin; }
 
                         public Vector3 Origin {
-                                get => type switch {
-                                        AnchorType.stationary => o,
-                                        AnchorType.localplayer => o = Human.Localplayer.transform.position,
+                                get => Type switch {
+                                        AnchorType.stationary => origin,
+                                        AnchorType.localplayer => origin = (Vector3.Distance(PlayerPos, syncOrigin) < 1) ? PlayerPos : syncOrigin = PlayerPos,
                                         _ => new(),
                                 };
-                                set => o = value;
+                                set => origin = value;
                         }
 
-                        public Vector3[] Ends {
-                                get => type switch {
-                                        AnchorType.stationary => e ??= GenEnds(),
-                                        AnchorType.localplayer => e = GenEnds(),
-                                        _ => new Vector3[1] { new() },
+                        Vector3[] Ends {
+                                // get => Type switch {
+                                //         AnchorType.stationary => ends ??= GenEnds(),
+                                //         AnchorType.localplayer => ends = shouldSync ? GenEnds() : ends ?? GenEnds(),
+                                //         _ => new Vector3[0],
+                                // };
+                                get => Type switch {
+                                        AnchorType.stationary => ends ??= GenEnds(),
+                                        AnchorType.localplayer => ends = GenEnds(),
+                                        _ => new Vector3[0],
                                 };
                         }
 
-                        public float Radius {
-                                get => r;
-                                set => r = value;
-                        }
 
-                        public int Count {
-                                get => n;
-                                set => n = value;
-                        }
-
-                        public RaycastHit[] Hits {
-                                get => type switch {
+                        EspHit[] Hits {
+                                // get => Type switch {
+                                //         AnchorType.stationary => hits ??= GenHits(),
+                                //         AnchorType.localplayer => hits = shouldSync ? GenHits() : hits ?? GenHits(),
+                                //         _ => new EspHit[0],
+                                // };
+                                get => Type switch {
                                         AnchorType.stationary => hits ??= GenHits(),
-                                        AnchorType.localplayer => hits = (Human.Localplayer.velocity.sqrMagnitude >= 0.5) ? GenHits() : hits,
-                                        _ => new RaycastHit[1] { new() },
+                                        AnchorType.localplayer => hits = GenHits(),
+                                        _ => new EspHit[0],
                                 };
                         }
 
-                        // public bool SampleCollidable { get; set; }
-                        // public bool SampleCP { get; set; }
-                        // public bool SamplePTrig { get; set; }
-                        // public bool SampleFTrig { get; set; }
-                        // public bool SampleMiscTrig { get; set; }
+                        public Dictionary<EspHit[], ColType> HitGroups {
+                                get => Type switch {
+                                        AnchorType.stationary => hitGroups ??= GroupHits(),
+                                        AnchorType.localplayer => hitGroups = shouldSync ? GroupHits() : hitGroups ?? GroupHits(),
+                                        _ => new(),
+                                };
+                        }
 
                         Vector3[] GenEnds() {
 
@@ -171,7 +169,7 @@ namespace spsp
 
                                 for (int i = 0; i < Count; i++) {
 
-                                        Vector3 p = DistriPointOnSphere(Origin, Radius, i, n);
+                                        Vector3 p = DistriPointOnSphere(Origin, Radius, i, Count);
 
                                         points.Add(p);
                                 }
@@ -179,26 +177,70 @@ namespace spsp
                                 return points.ToArray();
                         }
 
-                        RaycastHit[] GenHits() {
 
-                                List<RaycastHit> hitlist = new();
+                        EspHit[] GenHits() {
 
-                                foreach (var p in Ends) {
+                                List<EspHit> hitlist = new();
 
-                                        var dir = (Origin - p).normalized;
+                                foreach (var end in Ends) {
 
-                                        var hits = Physics.RaycastAll(new Ray(Origin, dir), r);
-
-                                        foreach (var hit in hits) {
+                                        foreach (var hit in Physics.RaycastAll(Origin, end - Origin, Radius)) {
 
                                                 if (hit.collider.transform.IsChildOf(Human.Localplayer.transform)) continue;
 
-                                                hitlist.Add(hit);
+                                                if (Camera.main.WorldToScreenPoint(hit.point).z < 0) continue;
+
+                                                hitlist.Add(new EspHit() { Pos = hit.point, Obj = hit.collider.gameObject });
                                         }
                                 }
 
                                 return hitlist.ToArray();
                         }
+
+                        Dictionary<EspHit[], ColType> GroupHits() {
+
+                                Dictionary<GameObject,List<EspHit>> dict = new();
+                                Dictionary<EspHit[], ColType> groups = new();
+
+                                foreach (var hit in Hits) {
+
+                                        if (dict.ContainsKey(hit.Obj)) dict[hit.Obj].Add(hit);
+
+                                        else dict.Add(hit.Obj, new() { hit });
+                                }
+
+                                foreach (var item in dict) {
+
+                                        ColType type;
+
+                                        if (!item.Key.GetComponent<Collider>().isTrigger) {
+                                                if (item.Key.gameObject.GetComponent<Rigidbody>() is not null) type = ColType.rigidbody;
+                                                else if (item.Key.gameObject.GetComponent<Renderer>() is not null) type = ColType.standard;
+                                                else type = ColType.invisible;
+                                        } else {
+                                                if (item.Key.gameObject.GetComponent<Checkpoint>() is not null) type = ColType.checkpoint;
+                                                else if (item.Key.gameObject.GetComponent<LevelPassTrigger>() is not null) type = ColType.passtrigger;
+                                                else if (item.Key.gameObject.GetComponent<FallTrigger>() is not null) type = ColType.falltrigger;
+                                                else type = ColType.trigger;
+                                        }
+
+                                        if (type!=ColType.standard) continue;
+
+                                        // NOTE: plcc said this approach might cause issue :|
+                                        // else color = hit.collider.gameObject.GetComponent<MonoBehaviour>() switch {
+                                        //         Checkpoint => new Color(1, 0.66f, 0),
+                                        //         LevelPassTrigger => Color.green,
+                                        //         FallTrigger => Color.red,
+                                        //         _ => Color.magenta,
+                                        // };
+
+                                        groups.Add(item.Value.ToArray(), type);
+                                }
+
+                                return groups;
+                        }
+
+
 
                         static Vector3 DistriPointOnSphere(Vector3 o, float r, int i, int n) {
 
@@ -216,13 +258,34 @@ namespace spsp
 
                                 return new Vector3(x, y, z) + o;
                         }
+                }
 
+                public struct EspHit {
 
+                        public Vector3 Pos;
+                        public GameObject Obj;
+                }
+
+                public struct EspLine {
+
+                        Vector3 p1;
+                        Vector3 p2;
+                        ColType color;
                 }
 
                 public enum AnchorType {
                         stationary,
                         localplayer,
+                }
+
+                public enum ColType {
+                        standard,
+                        rigidbody,
+                        invisible,
+                        trigger,
+                        checkpoint,
+                        passtrigger,
+                        falltrigger,
                 }
         }
 }
